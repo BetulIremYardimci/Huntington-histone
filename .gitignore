@@ -1,0 +1,5 @@
+huntington/plots
+huntington/results
+.Rdata
+.Rhistory
+*.rds

@@ -1,235 +1,305 @@
-library(ggplot2)
-library(gridExtra)
+#Huntington - H2AZ
+#Last Update 27 Feb 2026 - Betül İrem Yardımcı
 
-COLORS <- c("Control" = "#2980B9", "HD" = "#C0392B")
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(dplyr)
+  library(ggplot2)
+  library(gridExtra)
+  library(grid)
+  library(org.Hs.eg.db)
+})
+histone_genes <- c("H2AX", "H2AZ1", "MACROH2A1", "MACROH2A2")
+ensembl_ids <- c(
+  "ENSG00000188486",  # H2AX
+  "ENSG00000164032",  # H2AZ1
+  "ENSG00000134986",  # MACROH2A1
+  "ENSG00000172264"   # MACROH2A2
+)
+gene_map <- setNames(histone_genes, ensembl_ids)
 
+output_dir <- "results/BRCA/variant_coexpression"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
-#1- BAR PLOT
-plot_histone_expression <- function(histone_stats, sig_data,
-                                    save_path = "huntington/plots/histone_expression_barplot.png") {
+load("data/processed/BRCA_se_combat.RData")
+se_tumor <- se[, colData(se)$sample_type == "Tumor"]
 
-  gene_list  <- c("H2AFX", "H2AFY", "H2AFY2", "H2AFZ")
-  plot_list  <- list()
+dds <- DESeqDataSet(se_tumor, design = ~ 1)
+dds <- estimateSizeFactors(dds)
+vst_obj <- vst(dds, blind = FALSE)
+vst_matrix <- assay(vst_obj)
 
-  for (g in gene_list) {
-    df_plot   <- histone_stats[histone_stats$gene == g, ]
-    sig_label <- sig_data$label[sig_data$gene == g]
-    p_val_raw <- sig_data$padj[sig_data$gene == g]
+cat("Tumor samples:", ncol(se_tumor), "\n\n")
 
-    y_max     <- max(df_plot$mean_expr + df_plot$sd_expr)
-    y_bracket <- y_max * 1.05
-    y_star    <- y_max * 1.12
-
-    p <- ggplot(df_plot, aes(x = group, y = mean_expr, fill = group)) +
-      geom_bar(stat = "identity", width = 0.55, alpha = 0.9,
-               color = "white", linewidth = 0.5) +
-      geom_errorbar(aes(ymin = mean_expr - sd_expr,
-                        ymax = mean_expr + sd_expr),
-                    width = 0.15, linewidth = 0.7, color = "gray30") +
-      annotate("segment", x = 1, xend = 2,
-               y = y_bracket, yend = y_bracket, linewidth = 0.6) +
-      annotate("segment", x = 1, xend = 1,
-               y = y_bracket * 0.98, yend = y_bracket, linewidth = 0.6) +
-      annotate("segment", x = 2, xend = 2,
-               y = y_bracket * 0.98, yend = y_bracket, linewidth = 0.6) +
-      annotate("text", x = 1.5, y = y_star,
-               label = sig_label, size = 6, fontface = "bold") +
-      scale_fill_manual(values = c("Control" = "#A8C4D4", "HD" = "#F2A8A8")) +
-      labs(subtitle = paste0("adj.p = ", format.pval(p_val_raw, digits = 2)),
-           y = "VST Normalized Expression") +
-      theme_classic() +
-      theme(
-        plot.title    = element_text(hjust = 0.5, face = "bold", size = 14),
-        plot.subtitle = element_text(hjust = 0.5, size = 9, color = "gray30"),
-        axis.title.x  = element_blank(),
-        legend.position = "none"
-      ) +
-      ggtitle(g)
-
-    plot_list[[g]] <- p
-  }
-
-  title_grob    <- grid::textGrob("Histone Variant Expression — HD vs Control",
-                                  gp = grid::gpar(fontsize = 14, fontface = "bold"))
-  subtitle_grob <- grid::textGrob("VST normalized counts, DESeq2 adjusted p-values",
-                                  gp = grid::gpar(fontsize = 10, col = "gray40"))
-
-  legend_plot <- ggplot(data.frame(group = c("Control", "HD"), x = 1, y = 1),
-                        aes(x = x, y = y, fill = group)) +
-    geom_bar(stat = "identity") +
-    scale_fill_manual(values = c("Control" = "#A8C4D4", "HD" = "#F2A8A8"), name = "") +
-    theme_void() +
-    theme(legend.position = "bottom", legend.text = element_text(size = 11))
-  legend_grob <- .extract_legend(legend_plot)
-
-  final_plot <- gridExtra::arrangeGrob(
-    title_grob, subtitle_grob,
-    gridExtra::arrangeGrob(plot_list[["H2AFX"]], plot_list[["H2AFY"]], ncol = 2),
-    gridExtra::arrangeGrob(plot_list[["H2AFY2"]], plot_list[["H2AFZ"]], ncol = 2),
-    legend_grob,
-    heights = c(0.06, 0.04, 1, 1, 0.12)
-  )
-
-  dir.create(dirname(save_path), recursive = TRUE, showWarnings = FALSE)
-  ggsave(save_path, final_plot, width = 12, height = 10, dpi = 300)
-  cat("Kaydedildi:", save_path, "\n")
-}
-
-
-#2- KEGG DOT PLOT
-plot_kegg_dotplot <- function(kegg_results, top_n = 15,
-                              save_path = "huntington/plots/kegg_dotplot.png") {
-
-  kegg_df <- kegg_results@result[kegg_results@result$p.adjust < 0.05, ]
-  kegg_df$GeneRatio_num <- sapply(kegg_df$GeneRatio, function(x) {
-    parts <- strsplit(x, "/")[[1]]
-    as.numeric(parts[1]) / as.numeric(parts[2])
-  })
-
-  kegg_top <- head(kegg_df[order(kegg_df$p.adjust), ], top_n)
-  kegg_top$Description <- factor(kegg_top$Description, levels = rev(kegg_top$Description))
-
-  p <- ggplot(kegg_top, aes(x = GeneRatio_num, y = Description,
-                            size = Count, color = p.adjust)) +
-    geom_point() +
-    scale_color_gradient(low = "#C0392B", high = "#2980B9", name = "p.adjust") +
-    scale_size_continuous(range = c(3, 10), name = "Gene Count") +
-    theme_classic() +
-    theme(axis.text.y  = element_text(size = 10),
-          plot.title   = element_text(size = 13, face = "bold")) +
-    labs(title = "KEGG Pathway — H2AFZ Correlated Genes (HD)",
-         x = "Gene Ratio", y = NULL)
-
-  dir.create(dirname(save_path), recursive = TRUE, showWarnings = FALSE)
-  ggsave(save_path, p, width = 10, height = 7, dpi = 300)
-  cat("Kaydedildi:", save_path, "\n")
-
-  invisible(p)
-}
-
-
-#3- GO DOT PLOT
-plot_go_dotplot <- function(go_results, top_n = 15,
-                            save_path = "huntington/plots/go_dotplot.png") {
-
-  go_df <- go_results@result[go_results@result$p.adjust < 0.05, ]
-  go_df$GeneRatio_num <- sapply(go_df$GeneRatio, function(x) {
-    parts <- strsplit(x, "/")[[1]]
-    as.numeric(parts[1]) / as.numeric(parts[2])
-  })
-
-  go_top <- head(go_df[order(go_df$p.adjust), ], top_n)
-  go_top$Description <- factor(go_top$Description, levels = rev(go_top$Description))
-
-  p <- ggplot(go_top, aes(x = GeneRatio_num, y = Description,
-                          size = Count, color = p.adjust)) +
-    geom_point() +
-    scale_color_gradient(low = "#C0392B", high = "#2980B9", name = "p.adjust") +
-    scale_size_continuous(range = c(3, 10), name = "Gene Count") +
-    theme_classic() +
-    theme(axis.text.y  = element_text(size = 10),
-          plot.title   = element_text(size = 13, face = "bold")) +
-    labs(title = "GO Biological Process — H2AFZ Correlated Genes (HD)",
-         x = "Gene Ratio", y = NULL)
-
-  dir.create(dirname(save_path), recursive = TRUE, showWarnings = FALSE)
-  ggsave(save_path, p, width = 11, height = 7, dpi = 300)
-  cat("Kaydedildi:", save_path, "\n")
-
-  invisible(p)
-}
-
-
-#4- MITO SCATTER GRID
-plot_mito_scatter_grid <- function(target_genes, vst_mat, h2afz_expr, metadata,
-                                   save_path = "huntington/plots/H2AFZ_mito_scatter_grid.png") {
-
-  plot_list <- list()
-
-  for (i in 1:nrow(target_genes)) {
-    gene_sym    <- target_genes$symbol[i]
-    gene_entrez <- as.character(target_genes$entrez[i])
-    rho_ctrl    <- round(target_genes$cor_ctrl[i], 2)
-    rho_hd      <- round(target_genes$cor_hd[i], 2)
-
-    gene_idx  <- which(rownames(vst_mat) == gene_entrez)
-    gene_expr <- as.numeric(vst_mat[gene_idx, ])
-
-    df <- data.frame(
-      H2AFZ     = as.numeric(h2afz_expr),
-      gene_expr = gene_expr,
-      group     = metadata$condition
-    )
-
-    p <- ggplot(df, aes(x = H2AFZ, y = gene_expr, color = group)) +
-      geom_point(size = 1.8, alpha = 0.8) +
-      geom_smooth(method = "lm", se = TRUE, linewidth = 0.8) +
-      scale_color_manual(values = COLORS) +
-      theme_classic() +
-      theme(
-        plot.title      = element_text(size = 10, face = "bold"),
-        plot.subtitle   = element_text(size = 8, color = "gray40"),
-        axis.title      = element_text(size = 8),
-        axis.text       = element_text(size = 7),
-        legend.position = "none"
-      ) +
-      labs(
-        title    = gene_sym,
-        subtitle = paste0("Control: ρ=", rho_ctrl, " | HD: ρ=", rho_hd),
-        x        = "H2AFZ (VST)",
-        y        = paste0(gene_sym, " (VST)")
-      )
-
-    plot_list[[gene_sym]] <- p
-  }
-
-  # Legend
-  legend_plot <- ggplot(data.frame(group = c("Control", "HD"), x = 1, y = 1),
-                        aes(x = x, y = y, color = group)) +
-    geom_point() +
-    scale_color_manual(values = COLORS, name = "") +
-    theme_void() +
-    theme(legend.position = "bottom", legend.text = element_text(size = 11))
-  legend_grob <- .extract_legend(legend_plot)
-
-  title_grob <- grid::textGrob(
-    "H2AFZ vs Mitochondrial Genes — HD-Specific Correlations",
-    gp = grid::gpar(fontsize = 13, fontface = "bold")
-  )
-  subtitle_grob <- grid::textGrob(
-    "Genes correlated with H2AFZ exclusively in HD (GO: mitochondrial respirasome assembly)",
-    gp = grid::gpar(fontsize = 10, col = "gray40")
-  )
-
-  n <- nrow(target_genes)
-  grob_list <- plot_list[1:min(n, 9)]
-  # 9'dan az gen varsa boş plot ile doldur
-  while (length(grob_list) < 9) {
-    grob_list[[length(grob_list) + 1]] <- ggplot() + theme_void()
-  }
-
-  final_plot <- gridExtra::arrangeGrob(
-    title_grob,
-    subtitle_grob,
-    gridExtra::arrangeGrob(
-      grob_list[[1]], grob_list[[2]], grob_list[[3]],
-      grob_list[[4]], grob_list[[5]], grob_list[[6]],
-      grob_list[[7]], grob_list[[8]], grob_list[[9]],
-      ncol = 3
-    ),
-    legend_grob,
-    heights = c(0.08, 0.05, 1, 0.08)
-  )
-
-  dir.create(dirname(save_path), recursive = TRUE, showWarnings = FALSE)
-  ggsave(save_path, final_plot, width = 12, height = 13, dpi = 300)
-  cat("Kaydedildi:", save_path, "\n")
-}
-
-
-#helper function
-.extract_legend <- function(p) {
+extract_legend <- function(p) {
   tmp <- ggplot_gtable(ggplot_build(p))
   leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
-  tmp$grobs[[leg]]
+  if (length(leg) > 0) tmp$grobs[[leg]] else NULL
 }
+
+analyze_variant_coexpression <- function(target_ensembl, 
+                                         target_symbol, 
+                                         vst_matrix,
+                                         top_n = 10,
+                                         cor_threshold = 0.5,
+                                         output_dir) {
+  
+  cat("\n---", target_symbol, "---\n")
+  
+  # Target expression
+  target_expr <- vst_matrix[target_ensembl, ]
+  
+  # Calculate correlations with ALL genes
+  cat("Calculating correlations...\n")
+  correlations <- apply(vst_matrix, 1, function(gene_expr) {
+    tryCatch({
+      cor(target_expr, gene_expr, method = "spearman", use = "complete.obs")
+    }, error = function(e) NA)
+  })
+  
+  # Filter and sort
+  cor_df <- data.frame(
+    ensembl_id = names(correlations),
+    correlation = correlations,
+    stringsAsFactors = FALSE
+  ) %>%
+    filter(!is.na(correlation),
+           ensembl_id != target_ensembl,
+           abs(correlation) > cor_threshold) %>%
+    arrange(desc(abs(correlation))) %>%
+    head(top_n)
+  
+  if (nrow(cor_df) == 0) {
+    cat("  ⚠ No genes above |r| >", cor_threshold, "\n")
+    cat("  Trying lower threshold (0.4)...\n")
+    
+    cor_df <- data.frame(
+      ensembl_id = names(correlations),
+      correlation = correlations,
+      stringsAsFactors = FALSE
+    ) %>%
+      filter(!is.na(correlation),
+             ensembl_id != target_ensembl,
+             abs(correlation) > 0.4) %>%
+      arrange(desc(abs(correlation))) %>%
+      head(top_n)
+    
+    cor_threshold <- 0.4
+  }
+  
+  if (nrow(cor_df) == 0) {
+    cat("Still no genes above r > 0.4. Skipping.\n")
+    return(NULL)
+  }
+  
+  cat("  Found", nrow(cor_df), "genes above |r| >", cor_threshold, "\n")
+  
+  # Map to gene symbols
+  cor_df$gene_symbol <- mapIds(
+    org.Hs.eg.db,
+    keys = cor_df$ensembl_id,
+    column = "SYMBOL",
+    keytype = "ENSEMBL",
+    multiVals = "first"
+  )
+  
+  # Statistical tests
+  cor_df$p_value <- sapply(1:nrow(cor_df), function(i) {
+    gene_expr <- vst_matrix[cor_df$ensembl_id[i], ]
+    test <- cor.test(target_expr, gene_expr, method = "spearman")
+    test$p.value
+  })
+  
+  # Save correlation results
+  write.csv(cor_df,
+            paste0(output_dir, "/", target_symbol, "_top_correlations.csv"),
+            row.names = FALSE)
+  
+  cat("Saved correlation CSV\n")
+  
+  # -------------------------
+  # SCATTER GRID PLOT
+  # -------------------------
+  
+  cat("  Creating scatter grid...\n")
+  
+  plot_list <- list()
+  
+  for (i in 1:nrow(cor_df)) {
+    gene_sym <- cor_df$gene_symbol[i]
+    gene_ens <- cor_df$ensembl_id[i]
+    rho <- cor_df$correlation[i]
+    pval <- cor_df$p_value[i]
+    
+    # Gene expression
+    gene_expr <- vst_matrix[gene_ens, ]
+    
+    # Data frame
+    df <- data.frame(
+      target_expr = as.numeric(target_expr),
+      gene_expr = as.numeric(gene_expr)
+    )
+    
+    # P-value formatting
+    p_label <- ifelse(pval < 0.001, "p < 0.001",
+                      sprintf("p = %.3f", pval))
+    
+    # Plot
+    p <- ggplot(df, aes(x = target_expr, y = gene_expr)) +
+      geom_point(size = 1.5, alpha = 0.4, color = "#2C3E50") +
+      geom_smooth(method = "lm", se = TRUE, 
+                  color = "#E74C3C", fill = "#E74C3C",
+                  linewidth = 1, alpha = 0.2) +
+      theme_classic() +
+      theme(
+        plot.title = element_text(size = 11, face = "bold"),
+        plot.subtitle = element_text(size = 9, color = "gray40"),
+        axis.title = element_text(size = 9),
+        axis.text = element_text(size = 8),
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA)
+      ) +
+      labs(
+        title = gene_sym,
+        subtitle = sprintf("r = %.3f | %s", rho, p_label),
+        x = paste0(target_symbol, " (VST)"),
+        y = paste0(gene_sym, " (VST)")
+      )
+    
+    plot_list[[gene_sym]] <- p
+  }
+  n <- nrow(cor_df)
+  ncols <- ifelse(n <= 3, n, 3)
+  nrows <- ceiling(n / ncols)
+  
+  # Title
+  title_grob <- textGrob(
+    paste0(target_symbol, " Co-expression Network in BRCA"),
+    gp = gpar(fontsize = 14, fontface = "bold")
+  )
+  
+  subtitle_grob <- textGrob(
+    paste0("Top ", n, " correlated genes (|r| > ", cor_threshold, 
+           ", n=1090 tumors)"),
+    gp = gpar(fontsize = 11, col = "gray40")
+  )
+  
+  # Grid
+  plot_grid <- do.call(arrangeGrob, c(plot_list, list(ncol = ncols)))
+  
+  plot_height <- 4 * nrows + 2
+  
+  final_plot <- arrangeGrob(
+    title_grob,
+    subtitle_grob,
+    plot_grid,
+    heights = c(0.5, 0.3, nrows * 4)
+  )
+  
+  # Save
+  save_path <- paste0(output_dir, "/", target_symbol, "_scatter_grid.pdf")
+  ggsave(save_path, final_plot, 
+         width = 12, height = plot_height, 
+         dpi = 300, bg = "white")
+  
+  cat("  ✓ Saved scatter grid:", save_path, "\n")
+  
+  return(cor_df)
+}
+
+all_results <- list()
+
+for (i in 1:length(ensembl_ids)) {
+  ens_id <- ensembl_ids[i]
+  gene_name <- gene_map[ens_id]
+  
+  result <- analyze_variant_coexpression(
+    target_ensembl = ens_id,
+    target_symbol = gene_name,
+    vst_matrix = vst_matrix,
+    top_n = 10,
+    cor_threshold = 0.5,
+    output_dir = output_dir
+  )
+  
+  if (!is.null(result)) {
+    all_results[[gene_name]] <- result
+  }
+}
+
+summary_df <- data.frame(
+  Variant = character(),
+  N_Correlated = integer(),
+  Top_Gene = character(),
+  Top_Correlation = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (gene_name in names(all_results)) {
+  res <- all_results[[gene_name]]
+  
+  summary_df <- rbind(summary_df, data.frame(
+    Variant = gene_name,
+    N_Correlated = nrow(res),
+    Top_Gene = res$gene_symbol[1],
+    Top_Correlation = round(res$correlation[1], 3)
+  ))
+}
+
+print(summary_df)
+
+write.csv(summary_df,
+          paste0(output_dir, "/summary_all_variants.csv"),
+          row.names = FALSE)
+
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+h2ax_top_genes <- c("UBE2S", "SAC3D1", "CDT1", "SNRPA", "CREBRF", 
+                    "HMBS", "POP7", "PKMYT1", "UBE2C", "PPP1R14B")
+
+entrez_ids <- mapIds(
+  org.Hs.eg.db,
+  keys = h2ax_top_genes,
+  column = "ENTREZID",
+  keytype = "SYMBOL",
+  multiVals = "first"
+)
+
+kegg_result <- enrichKEGG(
+  gene = entrez_ids,
+  organism = "hsa",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05
+)
+
+go_result <- enrichGO(
+  gene = entrez_ids,
+  OrgDb = org.Hs.eg.db,
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+print(kegg_result@result[, c("Description", "p.adjust", "geneID")])
+
+print(go_result@result[, c("Description", "p.adjust", "geneID")])
+
+
+library(enrichplot)
+
+dotplot(go_result, showCategory = 15) +
+  labs(title = "H2AX Co-expression Network",
+       subtitle = "GO Biological Process Enrichment")
+
+ggsave("results/BRCA/h2ax_network/pathway_enrichment_GO.pdf",
+       width = 10, height = 8)
+
+dotplot(kegg_result, showCategory = 10) +
+  labs(title = "H2AX Co-expression Network",
+       subtitle = "KEGG Pathway Enrichment")
+
+ggsave("results/BRCA/h2ax_network/pathway_enrichment_KEGG.pdf",
+       width = 10, height = 6)

@@ -1,3 +1,6 @@
+#Huntington - H2AZ
+#Last Update 27 Feb 2026 - Betül İrem Yardımcı
+
 library(GEOquery)
 library(Biobase)
 library(org.Hs.eg.db)
@@ -9,8 +12,19 @@ library(dplyr)
 
 source("visualization_h.R")
 
-geo_id    <- "GSE64810"
-filepath  <- paste0("huntington/data/", geo_id, "_raw_counts.tsv")
+histone_entrez_map <- c(H2AFX = "3014", H2AFY = "9555", H2AFY2 = "55506", H2AFZ = "3015")
+#histone_entrez_map <- c(H3F3A = "3021", H3F3B = "3022", CENPA = "1058")
+
+OUTPUT_DIR <- "huntington/results/h2a"
+PLOT_DIR   <- "huntington/plots/h2a"
+
+#H3 + CENPA için:
+#OUTPUT_DIR <- "huntington/results/h3_cenpa"
+#PLOT_DIR   <- "huntington/plots/h3_cenpa"
+
+
+geo_id   <- "GSE64810"
+filepath <- paste0("huntington/data/", geo_id, "_raw_counts.tsv")
 
 if (file.exists(filepath)) {
   raw_counts <- read.table(filepath)
@@ -42,7 +56,9 @@ if (file.exists(filepath_norm)) {
   write.table(norm_counts, filepath_norm, sep = "\t", quote = FALSE)
 }
 
+# ============================================================
 # METADATA
+# ============================================================
 group    <- ifelse(substr(colnames(norm_counts), 1, 1) == "C", "Control", "HD")
 metadata <- data.frame(
   sample    = colnames(raw_counts),
@@ -54,40 +70,63 @@ write.table(metadata,
             paste0("huntington/data/", geo_id, "_metadata.tsv"),
             sep = "\t", quote = FALSE)
 
-# DESEQ2
-raw_counts_mat <- as.matrix(raw_counts)
-raw_counts_int <- round(raw_counts_mat)
-storage.mode(raw_counts_int) <- "integer"
+rds_path_dds    <- "huntington/data/rds/dds.rds"
+rds_path_res    <- "huntington/data/rds/res_df.rds"
+rds_path_vst    <- "huntington/data/rds/vst_mat.rds"
+rds_path_meta   <- "huntington/data/rds/metadata.rds"
 
-dds  <- DESeqDataSetFromMatrix(countData = raw_counts_int,
-                               colData   = metadata,
-                               design    = ~ condition)
-keep <- rowSums(counts(dds) >= 10) >= 5
-dds  <- dds[keep, ]
-dds  <- DESeq(dds)
+if (file.exists(rds_path_dds)) {
+  dds     <- readRDS(rds_path_dds)
+  res_df  <- readRDS(rds_path_res)
+  vst_mat <- readRDS(rds_path_vst)
+  metadata <- readRDS(rds_path_meta)
+} else {
+  raw_counts_mat <- as.matrix(raw_counts)
+  raw_counts_int <- round(raw_counts_mat)
+  storage.mode(raw_counts_int) <- "integer"
+  
+  dds  <- DESeqDataSetFromMatrix(countData = raw_counts_int,
+                                 colData   = metadata,
+                                 design    = ~ condition)
+  keep <- rowSums(counts(dds) >= 10) >= 5
+  dds  <- dds[keep, ]
+  dds  <- DESeq(dds)
+  
+  res    <- results(dds, contrast = c("condition", "HD", "Control"), alpha = 0.05)
+  res_df <- as.data.frame(res)
+  res_df$entrez <- rownames(res_df)
+  summary(res)
+  
+  vst_counts <- vst(dds, blind = FALSE)
+  vst_mat    <- assay(vst_counts)
+  
+  dir.create("huntington/data/rds", recursive = TRUE, showWarnings = FALSE)
+  saveRDS(dds,      rds_path_dds)
+  saveRDS(res_df,   rds_path_res)
+  saveRDS(vst_mat,  rds_path_vst)
+  saveRDS(metadata, rds_path_meta)
+}
 
-res    <- results(dds, contrast = c("condition", "HD", "Control"), alpha = 0.05)
-res_df <- as.data.frame(res)
-res_df$entrez <- rownames(res_df)
-
-summary(res)
-
-# Histone results
-histone_entrez_map <- c(H2AFX = "3014", H2AFY = "9555", H2AFY2 = "55506", H2AFZ = "3015")
 
 histone_results <- res_df[res_df$entrez %in% histone_entrez_map, ]
 histone_results$gene <- names(histone_entrez_map)[match(histone_results$entrez, histone_entrez_map)]
+
+cat("\nHistone DESeq2 sonuçları:\n")
 print(histone_results[, c("gene", "log2FoldChange", "pvalue", "padj")])
 
-write.csv(res_df, "huntington/results/deseq2_full_results.csv")
+sig_histones <- histone_results[!is.na(histone_results$padj) & histone_results$padj < 0.05, ]
+if (nrow(sig_histones) == 0) {
+  cat("\nUYARI: Hiçbir histone geni anlamlı değil (padj < 0.05). İleri analiz önerilmez.\n")
+} else {
+  cat("\nAnlamlı histone genleri:\n")
+  print(sig_histones[, c("gene", "log2FoldChange", "padj")])
+}
 
-# VST
-vst_counts <- vst(dds, blind = FALSE)
-vst_mat    <- assay(vst_counts)
+dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+write.csv(res_df, paste0(OUTPUT_DIR, "/deseq2_full_results.csv"), row.names = FALSE)
 
-
-# Histone VST Expression
-histone_vst <- vst_mat[rownames(vst_mat) %in% histone_entrez_map, ]
+#VST EXPRESSION - BAR PLOT
+histone_vst <- vst_mat[rownames(vst_mat) %in% histone_entrez_map, , drop = FALSE]
 rownames(histone_vst) <- names(histone_entrez_map)[match(rownames(histone_vst), histone_entrez_map)]
 
 histone_long <- as.data.frame(histone_vst) %>%
@@ -114,17 +153,11 @@ sig_data <- res_df %>%
     TRUE         ~ "ns"
   ))
 
-#plot
+dir.create(PLOT_DIR, recursive = TRUE, showWarnings = FALSE)
+
 plot_histone_expression(
   histone_stats = histone_stats,
   sig_data      = sig_data,
-  save_path     = "huntington/plots/histone_expression_barplot.png"
+  gene_list     = names(histone_entrez_map),
+  save_path     = paste0(PLOT_DIR, "/histone_expression_barplot.png")
 )
-
-
-#save
-dir.create("huntington/data/rds", recursive = TRUE, showWarnings = FALSE)
-saveRDS(vst_mat,  "huntington/data/rds/vst_mat.rds")
-saveRDS(metadata, "huntington/data/rds/metadata.rds")
-saveRDS(res_df,   "huntington/data/rds/res_df.rds")
-saveRDS(dds,      "huntington/data/rds/dds.rds")
